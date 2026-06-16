@@ -7,6 +7,9 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust Railway's proxy
+app.set('trust proxy', 1);
+
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "50mb" })); // 50mb for base64 images
 app.use(cors({
