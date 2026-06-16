@@ -2269,8 +2269,6 @@ export default function PhoenixControlsAgent() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   const isMobile = winW < 768;
-  const SB_W = isMobile ? Math.min(winW - 40, 280) : 220;
-
   // Close sidebar when tapping backdrop on mobile
   const closeSidebarMobile = () => { if (isMobile) setSidebarOpen(false); };
 
