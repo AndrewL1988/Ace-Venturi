@@ -3,3 +3,7 @@ cmd = "npm install && npm run build && cd server && npm install && cd .."
 
 [start]
 cmd = "node server/index.js"
+
+[env]
+# Disable CRA detection - this is a Node.js backend, not a static frontend
+RAILPACK_DISABLE_CRA = "true"
