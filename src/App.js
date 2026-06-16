@@ -473,7 +473,7 @@ This is a critical knowledge area. Phoenix Controls CSCP devices (PBC, FHD500, A
 #### HOW PHOENIX CONTROLS WORKBENCH (PBC-CT) RELATES TO NIAGARA 4
 - **Phoenix Controls Workbench IS built on the Niagara 4 framework.** It is a licensed, customized version of Niagara Workbench with Phoenix Controls-specific palettes, drivers, and commissioning tools layered on top.
 - **Version requirement**: Phoenix Controls Workbench 3.0 or later is required for full Niagara 4 support. Earlier versions (2.x) supported NiagaraAX only.
-- **Workbench version path**: `C:\Niagara\PhoenixControls-4.9.x.xx\` (varies by installed version).
+- **Workbench version path**: \`C:\\Niagara\\PhoenixControls-4.9.x.xx\\\` (varies by installed version).
 - **You MUST have a Phoenix Controls-licensed copy of Workbench** to commission CSCP devices. A standard Niagara Workbench without Phoenix Controls licensing will NOT have the Phoenix palettes needed for PBC/FHD500/ACM commissioning.
 - **Familiarity with Niagara Workbench concepts is explicitly required** by Phoenix Controls documentation: Platforms, Stations, Nav tree navigation. Without this knowledge, you cannot commission CSCP systems.
 
@@ -490,7 +490,7 @@ Step-by-step, this is how it works:
 **Step 1 — Connect to the Platform:**
 1. Open Phoenix Controls Workbench.
 2. In the Nav sidebar, open the Platform connection to the PBC's IP address.
-3. The PBC defaults to DHCP — run `arp -a` in Windows CMD ~15 seconds after power-up to find its IP.
+3. The PBC defaults to DHCP — run \`arp -a\` in Windows CMD ~15 seconds after power-up to find its IP.
 4. Enter platform credentials (default: admin/admin on first connection — change immediately).
 
 **Step 2 — Open the Station:**
@@ -542,7 +542,7 @@ Step-by-step, this is how it works:
 - **Connecting to PCI8000**: Open Workbench → platform connection → enter PCI IP address → Fox protocol (port 1911).
 - **CRITICAL**: You cannot just swap in a PCI8000 on an existing MacroServer/LNS system and expect it to work. Upgrading from MacroServer to PCI8000 is a major project requiring database rebuilding and network reconfiguration.
 - **Optional remote I/O**: PCI8000 supports optional remote I/O modules for direct hardwired control of third-party devices (lighting, temperature sequences, air quality sensors).
-- **Vision software (MKT-0467)**: Phoenix Controls Vision is a graphical front-end that runs on the PCI8000. Configured through Workbench. Default nav file location: `C:\Niagara\PhoenixControls-4.9.x.xx\`. Must run Workbench as Administrator for upload to succeed.
+- **Vision software (MKT-0467)**: Phoenix Controls Vision is a graphical front-end that runs on the PCI8000. Configured through Workbench. Default nav file location: \`C:\\Niagara\\PhoenixControls-4.9.x.xx\\\`. Must run Workbench as Administrator for upload to succeed.
 
 #### PORTAL — NIAGARA-BASED VISUALIZATION (MKT-0339)
 - Runs on the Tridium NiagaraAX/N4 JACE platform. All NiagaraAX JACE features are available.
@@ -560,7 +560,7 @@ Step-by-step, this is how it works:
 #### COMMON NIAGARA / PHOENIX CONTROLS INTEGRATION PROBLEMS & FIXES
 
 **Problem: Workbench can't connect to PBC platform**
-- Verify IP address (use `arp -a` in Windows CMD — wait 15s after PBC power-up for DHCP).
+- Verify IP address (use \`arp -a\` in Windows CMD — wait 15s after PBC power-up for DHCP).
 - Verify Fox protocol port 1911 is not blocked by firewall or VLAN.
 - Try pinging the PBC IP first — if ping fails, it's a network/IP issue, not Workbench.
 - Check that PBC has 24VAC power and is fully booted (LEDs stable).
@@ -591,7 +591,7 @@ Step-by-step, this is how it works:
 **Problem: Vision software upload fails**
 - Must run Workbench as Administrator before connecting to PCI.
 - Navigation file (.nav) must be transferred to station via File Transfer Client in Workbench.
-- Default nav file path: `C:\Niagara\PhoenixControls-4.9.x.xx\` (check installed version folder).
+- Default nav file path: \`C:\\Niagara\\PhoenixControls-4.9.x.xx\\\` (check installed version folder).
 
 #### KEY NIAGARA CONCEPTS EVERY PHOENIX TECH SHOULD KNOW
 - **Device Instance**: BACnet term for a device's unique network ID. Must be unique across the ENTIRE BACnet network (not just one subnet). Phoenix Controls calls this the "BACnet device instance." Duplicate = discovery failures.
@@ -619,7 +619,7 @@ Step-by-step, this is how it works:
 - Workbench 3.0+ = Niagara 4 support added (required for CSCP — PBC, FHD500, ACM)
 - Workbench 2.5+ = Minimum for PCI8000 commissioning
 - Always run the latest Phoenix Controls Workbench version available for your SMA level
-- Installation path: `C:\Niagara\PhoenixControls-4.x.x.xx\` — version number in folder name
+- Installation path: \`C:\\Niagara\\PhoenixControls-4.x.x.xx\\\` — version number in folder name
 
 ---
 
@@ -755,7 +755,7 @@ Px (Presentation XML) is Niagara's graphical view system — HTML5 in N4.
 - Configured through Phoenix Controls Workbench. Upload requires running Workbench as Administrator.
 - Provides floor plan views, valve health dashboards, alarm summaries, lab pressure status.
 - Add Vision to PCI8000: In Workbench Nav panel → upload existing station from PCI to localhost → right-click PCI → add Vision components → overwrite confirmation → deploy.
-- Nav file default location: `C:\Niagara\PhoenixControls-4.x.x.xx\`
+- Nav file default location: \`C:\\Niagara\\PhoenixControls-4.x.x.xx\\\`
 - Navigation hierarchy: Campus → Building → Floor → Room → Valve/Hood
 
 **Building custom Px graphics for CSCP systems:**
@@ -770,7 +770,7 @@ Px (Presentation XML) is Niagara's graphical view system — HTML5 in N4.
 - Link Px pages: hyperlink between floor plan view → room detail view → individual valve detail.
 - Save Px file to station via File → Save to Station.
 
-**N4 HTML5 web UI:** In N4, Px pages are served as HTML5 — no Java plugin required. Users access via browser at `https://[JACE-IP]/ord?[page-ord]`. Accessible from any device on the building network.
+**N4 HTML5 web UI:** In N4, Px pages are served as HTML5 — no Java plugin required. Users access via browser at \`https://[JACE-IP]/ord?[page-ord]\`. Accessible from any device on the building network.
 
 ---
 
@@ -850,7 +850,7 @@ NOTE: USB backup NOT supported if JACE 8000 was converted from NiagaraAX to N4 �
 5. Add Phoenix Controls Room Manager View (RoomManagerView) for each room.
 6. Configure alarm extensions: right-click each valve point → add alarm for each alarm type (flow, pressure, jam, FV).
 7. Add history extensions: Config → Services → History Service → History Extension Manager.
-8. Upload Vision nav file from `C:\Niagara\PhoenixControls-4.x.x.xx\` to station via File Transfer Client.
+8. Upload Vision nav file from \`C:\\Niagara\\PhoenixControls-4.x.x.xx\\\` to station via File Transfer Client.
 9. Run Workbench as Administrator — most upload failures are permission issues.
 
 ### ══════════════════════════════════════
@@ -1047,18 +1047,18 @@ This section is CRITICAL for legacy board replacement work. Getting jumpers/conf
 **Critical insight**: The X30 series does NOT use traditional PCB jumpers for configuration. All mode selection is done through **Calibration Parameter 1 (FHM Mode)** in software. This is the equivalent of what jumpers do on older boards — it tells the board what type of hood/valve it is controlling.
 
 **Parameter 1 — FHM Mode (MUST be set first, before all other parameters):**
-- `vAvv` — Standard VAV valve (EXV with variable airflow, sash sensor required)
-- `vAvd` — VAV drive hood (drive application, e.g. variable speed drive)
-- `cvn` — Constant volume, no sash input (CV valve, no sash sensor wired)
-- `cvA` — Constant volume with sash alarm (CV valve + sash switch for alarm only)
-- `cvS` — Constant volume with setback (CV valve + ZPS for occupancy setback)
-- `cvSA` — Constant volume with setback and sash alarm
-- `2St` — Two-state (PEV or BEV solenoid valve, FHM530 only)
-- `2StS` — Two-state with ZPS setback (FHM530 only)
-- `2StA` — Two-state with sash alarm (FHM530 only)
-- Default from factory: `vAvd` (FHM631), `0004`/CFM units (FHM430)
+- \`vAvv\` — Standard VAV valve (EXV with variable airflow, sash sensor required)
+- \`vAvd\` — VAV drive hood (drive application, e.g. variable speed drive)
+- \`cvn\` — Constant volume, no sash input (CV valve, no sash sensor wired)
+- \`cvA\` — Constant volume with sash alarm (CV valve + sash switch for alarm only)
+- \`cvS\` — Constant volume with setback (CV valve + ZPS for occupancy setback)
+- \`cvSA\` — Constant volume with setback and sash alarm
+- \`2St\` — Two-state (PEV or BEV solenoid valve, FHM530 only)
+- \`2StS\` — Two-state with ZPS setback (FHM530 only)
+- \`2StA\` — Two-state with sash alarm (FHM530 only)
+- Default from factory: \`vAvd\` (FHM631), \`0004\`/CFM units (FHM430)
 
-**Why this matters on board replacement**: A replacement FHM631 board ships from the factory in a default mode. If your application is `cvn` (constant volume, no sash) and the board is in `vAvv` (VAV), the board will immediately throw a flow alarm and sash sensor fault because it's looking for a sash signal that doesn't exist. Calibration will appear to complete but the system will not function.
+**Why this matters on board replacement**: A replacement FHM631 board ships from the factory in a default mode. If your application is \`cvn\` (constant volume, no sash) and the board is in \`vAvv\` (VAV), the board will immediately throw a flow alarm and sash sensor fault because it's looking for a sash signal that doesn't exist. Calibration will appear to complete but the system will not function.
 
 **Board-level hardware on X30 FHMs:**
 - **Power Loss Alarm (PLA) option**: Separate PLA module clips onto board. PLA has sealed lead-acid battery. Battery recharges in 8 hours, powers alarm for 24 hours, 5-year expected service life. Test button on PLA enclosure — hold 4+ seconds to test. PLA must be powered from same ±15VDC as the monitor. NOT available for 24VAC powered monitors.
