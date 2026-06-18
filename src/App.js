@@ -484,7 +484,7 @@ This is a critical knowledge area. Phoenix Controls CSCP devices (PBC, FHD500, A
 #### HOW PHOENIX CONTROLS WORKBENCH (PBC-CT) RELATES TO NIAGARA 4
 - **Phoenix Controls Workbench IS built on the Niagara 4 framework.** It is a licensed, customized version of Niagara Workbench with Phoenix Controls-specific palettes, drivers, and commissioning tools layered on top.
 - **Version requirement**: Phoenix Controls Workbench 3.0 or later is required for full Niagara 4 support. Earlier versions (2.x) supported NiagaraAX only.
-- **Workbench version path**: `C:\Niagara\PhoenixControls-4.9.x.xx\` (varies by installed version).
+- **Workbench version path**: \`C:\\Niagara\\PhoenixControls-4.9.x.xx\\\` (varies by installed version).
 - **You MUST have a Phoenix Controls-licensed copy of Workbench** to commission CSCP devices. A standard Niagara Workbench without Phoenix Controls licensing will NOT have the Phoenix palettes needed for PBC/FHD500/ACM commissioning.
 - **Familiarity with Niagara Workbench concepts is explicitly required** by Phoenix Controls documentation: Platforms, Stations, Nav tree navigation. Without this knowledge, you cannot commission CSCP systems.
 
