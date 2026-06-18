@@ -1,141 +1,141 @@
-# 🕵️ Ace Venturi: Controls Detective
+# 🕵️ Ace Venturi: Controls Detective v2.0
 
-A complete Phoenix Controls HVAC field toolkit — AI chat, valve sizer, FV calculator, wiring guide generator, commissioning checklists, alarm log, BACnet network calculator, model decoder, and equipment registry.
+Phoenix Controls HVAC AI field toolkit with user authentication and cloud chat history.
 
 ---
 
-## Quick Start (Local Development)
+## What's New in v2.0
 
-### 1. Prerequisites
-- Node.js 18+ — https://nodejs.org
-- An Anthropic API key — https://console.anthropic.com
+- **Login system** — Users sign up / sign in with email or Google (powered by Clerk)
+- **Cloud chat history** — Chats save to a real database and follow users across any device
+- **Per-user data** — Alarm logs and equipment registry are private to each user
+- **Secure API** — Every request is authenticated; no unauthenticated access to the AI
 
-### 2. Install dependencies
+---
+
+## Setup Guide — Step by Step
+
+### Step 1 — Create a Clerk account (free)
+
+1. Go to **https://clerk.com** and click "Start building for free"
+2. Sign up and create a new application
+3. Name it "Ace Venturi Controls Detective"
+4. Under "How will your users sign in?" — select **Email** and optionally **Google**
+5. Click **Create application**
+6. Go to **API Keys** in the left sidebar
+7. Copy two keys:
+   - **Publishable key** — starts with `pk_test_...` (safe for frontend)
+   - **Secret key** — starts with `sk_test_...` (server only, keep private)
+
+### Step 2 — Create a Supabase account (free)
+
+1. Go to **https://supabase.com** and click "Start your project"
+2. Sign up and click **New project**
+3. Name it `ace-venturi`, choose a region close to you, set a database password
+4. Wait ~2 minutes for the project to provision
+5. Go to **Settings → API** in the left sidebar
+6. Copy two values:
+   - **Project URL** — looks like `https://abcdefgh.supabase.co`
+   - **service_role key** — under "Project API keys" → `service_role` (keep private)
+
+### Step 3 — Set up the database
+
+1. In your Supabase dashboard, click **SQL Editor** in the left sidebar
+2. Click **New query**
+3. Open the file `database/schema.sql` from this project
+4. Copy the entire contents and paste into the SQL editor
+5. Click **Run** (green button)
+6. You should see "Success. No rows returned" — your tables are created
+
+### Step 4 — Configure your environment
+
+In your project root folder, create a file called `.env` (copy from `.env.example`):
+
+```
+ANTHROPIC_API_KEY=sk-ant-your-actual-key
+CLERK_SECRET_KEY=sk_test_your-clerk-secret-key
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+PORT=3001
+NODE_ENV=development
+ALLOWED_ORIGIN=http://localhost:3000
+REACT_APP_CLERK_PUBLISHABLE_KEY=pk_test_your-clerk-publishable-key
+```
+
+> ⚠️ REACT_APP_ variables go in the root .env (not /server/.env).
+> Both files should be in .gitignore — never commit them.
+
+### Step 5 — Install dependencies
+
+Open a terminal in your project folder and run:
 
 ```bash
-# Install React frontend dependencies
+# Frontend dependencies
 npm install
 
-# Install server dependencies
+# Server dependencies
 cd server && npm install && cd ..
 ```
 
-### 3. Configure your API key
+### Step 6 — Run locally
 
 ```bash
-cp .env.example .env
-```
-
-Open `.env` and replace `sk-ant-your-key-here` with your actual Anthropic API key.
-
-### 4. Run locally
-
-```bash
-# Run both the React app AND the proxy server together
 npm run dev
 ```
 
-- React app → http://localhost:3000
-- Proxy server → http://localhost:3001
+- Frontend → http://localhost:3000
+- Server → http://localhost:3001
+
+You should see a login screen. Sign up with your email and you're in.
 
 ---
 
-## Deploying to the Web
+## Deploying to Railway (Production)
 
-### Option A — Railway (Easiest, ~2 minutes)
+### Environment variables to add in Railway dashboard:
 
-1. Push this folder to a GitHub repo
-2. Go to https://railway.app → New Project → Deploy from GitHub
-3. Select your repo
-4. Add environment variable: `ANTHROPIC_API_KEY` = your key
-5. Add `NODE_ENV=production` and `PORT=3001`
-6. Railway auto-detects and deploys. Done.
+| Variable | Where to get it |
+|---|---|
+| `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `CLERK_SECRET_KEY` | Clerk dashboard → API Keys |
+| `SUPABASE_URL` | Supabase → Settings → API |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API |
+| `REACT_APP_CLERK_PUBLISHABLE_KEY` | Clerk dashboard → API Keys |
+| `NODE_ENV` | Set to `production` |
+| `ALLOWED_ORIGIN` | Your Railway URL (e.g. `https://ace-venturi.up.railway.app`) |
 
-### Option B — Render (Free tier available)
+### Update Clerk for production:
 
-1. Push to GitHub
-2. Go to https://render.com → New Web Service
-3. Connect your repo
-4. Set:
-   - Build Command: `npm install && cd server && npm install && cd .. && npm run build`
-   - Start Command: `NODE_ENV=production node server/index.js`
-5. Add environment variables: `ANTHROPIC_API_KEY`, `NODE_ENV=production`, `ALLOWED_ORIGIN=https://your-render-url.onrender.com`
-6. Deploy
+1. In Clerk dashboard → **Domains**
+2. Add your Railway URL as an allowed origin
+3. Railway will give you a URL after first deploy — add it there
 
-### Option C — Vercel (Frontend) + Railway (Backend)
+### Build & start command for Railway:
 
-**Backend on Railway:**
-1. Deploy just the `/server` folder to Railway
-2. Set `ANTHROPIC_API_KEY`, `NODE_ENV=production`, `ALLOWED_ORIGIN=https://your-vercel-app.vercel.app`
-3. Note your Railway URL (e.g. `https://ace-venturi.up.railway.app`)
+- **Build**: `npm install && cd server && npm install && cd .. && npm run build`
+- **Start**: `NODE_ENV=production node server/index.js`
 
-**Frontend on Vercel:**
-1. In `src/App.js`, change the fetch URL from `/api/chat` to your Railway URL + `/api/chat`
-2. Deploy the root folder to Vercel
-3. Done — unlimited scaling
+---
 
-### Option D — VPS / Your Own Server (Ubuntu/Debian)
+## How the Auth Flow Works
 
-```bash
-# On your server:
-git clone your-repo
-cd ace-venturi
-npm install
-cd server && npm install && cd ..
-npm run build
-
-# Copy .env.example to .env and add your API key
-cp .env.example .env
-nano .env
-
-# Run with PM2 (keeps it alive after logout)
-npm install -g pm2
-NODE_ENV=production pm2 start server/index.js --name ace-venturi
-pm2 save
-pm2 startup
-
-# Set up Nginx reverse proxy (optional, for custom domain + SSL)
-# Point your domain to the server IP, then:
-sudo apt install nginx certbot python3-certbot-nginx
-# Configure Nginx to proxy port 3001
 ```
-
-**Nginx config example** (`/etc/nginx/sites-available/ace-venturi`):
-```nginx
-server {
-    server_name ace-venturi.yourcompany.com;
-    location / {
-        proxy_pass http://localhost:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
+User visits app
+       ↓
+Clerk shows login/signup screen (fully built, no code needed)
+       ↓
+User signs in → Clerk issues a JWT token
+       ↓
+Frontend attaches token to every API request (Authorization: Bearer ...)
+       ↓
+Server verifies token with Clerk SDK (ClerkExpressRequireAuth)
+       ↓
+Clerk confirms token → req.auth.userId is set
+       ↓
+Server uses userId to read/write only that user's data in Supabase
+       ↓
+User sees their own chats, alarms, equipment — nobody else's
 ```
-
-Then run: `sudo certbot --nginx -d ace-venturi.yourcompany.com`
-
----
-
-## Environment Variables Reference
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | **Yes** | Your Anthropic API key from console.anthropic.com |
-| `PORT` | No | Server port (default: 3001) |
-| `ALLOWED_ORIGIN` | No | Your frontend URL for CORS (default: localhost:3000) |
-| `NODE_ENV` | No | Set to `production` when deploying |
-
----
-
-## Security Notes
-
-- **Never commit `.env`** — it's in `.gitignore` for this reason
-- The API key lives only on the server — users never see it
-- Rate limiting is enabled: 30 requests/minute per IP
-- CORS is restricted to `ALLOWED_ORIGIN` in production
 
 ---
 
@@ -143,20 +143,38 @@ Then run: `sudo certbot --nginx -d ace-venturi.yourcompany.com`
 
 ```
 ace-venturi/
+├── database/
+│   └── schema.sql              ← Run this in Supabase SQL editor
 ├── public/
-│   └── index.html          # React HTML shell
+│   └── index.html
 ├── src/
-│   ├── index.js            # React entry point
-│   └── App.js              # Full Ace Venturi application
+│   ├── index.js                ← Wraps app in ClerkProvider
+│   ├── api.js                  ← Authenticated API helper functions
+│   └── App.js                  ← Full Ace Venturi application
 ├── server/
-│   ├── index.js            # Express proxy server
-│   └── package.json        # Server dependencies
-├── .env.example            # Environment variable template
-├── .env                    # Your actual config (DO NOT COMMIT)
+│   ├── index.js                ← Express server with Clerk + Supabase
+│   └── package.json
+├── .env.example                ← Template — copy to .env
+├── .env                        ← Your actual config (DO NOT COMMIT)
 ├── .gitignore
 ├── package.json
 └── README.md
 ```
+
+---
+
+## Adding Payments Later (Stripe)
+
+When you're ready to charge for access:
+
+1. Create a Stripe account at stripe.com
+2. Add `STRIPE_SECRET_KEY` to your server `.env`
+3. Add `REACT_APP_STRIPE_PUBLISHABLE_KEY` to your frontend `.env`
+4. Add a `subscriptions` table to Supabase
+5. Check subscription status in the `/api/chat` route before processing
+6. Add a `/api/billing` route for Stripe webhooks
+
+We can build all of this out when you're ready.
 
 ---
 
