@@ -2852,9 +2852,6 @@ You are direct, precise, and practical. Your responses reflect genuine field exp
 // ─── Tools ────────────────────────────────────────────────────────────────────
 const TOOLS = [];
 
-// ─── Tools ────────────────────────────────────────────────────────────────────
-const TOOLS = [];
-
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 const CHATS_INDEX_KEY = "phx:chats_index";
 const ALARMS_KEY = "phx:alarms";
