@@ -1,4 +1,4 @@
-# 🕵️ Ace Venturi: Controls Detective v2.0
+# 🔍 Agent Venturi: Phoenix Controls Expert v2.0
 
 Phoenix Controls HVAC AI field toolkit with user authentication and cloud chat history.
 
@@ -19,7 +19,7 @@ Phoenix Controls HVAC AI field toolkit with user authentication and cloud chat h
 
 1. Go to **https://clerk.com** and click "Start building for free"
 2. Sign up and create a new application
-3. Name it "Ace Venturi Controls Detective"
+3. Name it "Agent Venturi Phoenix Controls Expert"
 4. Under "How will your users sign in?" — select **Email** and optionally **Google**
 5. Click **Create application**
 6. Go to **API Keys** in the left sidebar
@@ -31,7 +31,7 @@ Phoenix Controls HVAC AI field toolkit with user authentication and cloud chat h
 
 1. Go to **https://supabase.com** and click "Start your project"
 2. Sign up and click **New project**
-3. Name it `ace-venturi`, choose a region close to you, set a database password
+3. Name it `agent-venturi`, choose a region close to you, set a database password
 4. Wait ~2 minutes for the project to provision
 5. Go to **Settings → API** in the left sidebar
 6. Copy two values:
@@ -102,7 +102,7 @@ You should see a login screen. Sign up with your email and you're in.
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API |
 | `REACT_APP_CLERK_PUBLISHABLE_KEY` | Clerk dashboard → API Keys |
 | `NODE_ENV` | Set to `production` |
-| `ALLOWED_ORIGIN` | Your Railway URL (e.g. `https://ace-venturi.up.railway.app`) |
+| `ALLOWED_ORIGIN` | Your Railway URL (e.g. `https://agent-venturi.up.railway.app`) |
 
 ### Update Clerk for production:
 
@@ -142,7 +142,7 @@ User sees their own chats, alarms, equipment — nobody else's
 ## Project Structure
 
 ```
-ace-venturi/
+agent-venturi/
 ├── database/
 │   └── schema.sql              ← Run this in Supabase SQL editor
 ├── public/
@@ -150,7 +150,7 @@ ace-venturi/
 ├── src/
 │   ├── index.js                ← Wraps app in ClerkProvider
 │   ├── api.js                  ← Authenticated API helper functions
-│   └── App.js                  ← Full Ace Venturi application
+│   └── App.js                  ← Full Agent Venturi application
 ├── server/
 │   ├── index.js                ← Express server with Clerk + Supabase
 │   └── package.json

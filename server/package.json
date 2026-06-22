@@ -1,7 +1,7 @@
 {
-  "name": "ace-venturi-server",
+  "name": "agent-venturi-server",
   "version": "2.0.0",
-  "description": "Ace Venturi: Controls Detective — Backend with Clerk auth + Supabase",
+  "description": "Agent Venturi: Phoenix Controls Expert — Backend with Clerk auth + Supabase",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

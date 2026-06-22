@@ -1,49 +1,209 @@
+// ============================================================
+// Agent Venturi: Phoenix Controls Expert — Server v3.0
+// HARDENED for Railway deployment — all 12 safeguards active
+// ============================================================
+
 require("dotenv").config();
 const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");
-const rateLimit = require("express-rate-limit");
-const { createClient } = require("@supabase/supabase-js");
-const { ClerkExpressRequireAuth, ClerkExpressWithAuth } = require("@clerk/clerk-sdk-node");
+const cors    = require("cors");
+const fetch   = require("node-fetch");
+const { createClient }              = require("@supabase/supabase-js");
+const { ClerkExpressRequireAuth,
+        ClerkExpressWithAuth }       = require("@clerk/clerk-sdk-node");
 
-// ── Free tier rate limiting — 10 questions per IP per 24hrs ──
-const FREE_LIMIT = 30; // 30 questions per session per IP (24hr reset)
-const FREE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
-const freeUsage = new Map(); // ip -> { count, resetAt }
+// ============================================================
+// SAFEGUARD 0 — ENVIRONMENT VARIABLE CONFIGURATION
+// All limits are read from env vars so you can change them
+// in Railway dashboard without touching code or redeploying.
+// ============================================================
+const CFG = {
+  MAX_EXECUTIONS_PER_HOUR : parseInt(process.env.MAX_EXECUTIONS_PER_HOUR  || "50",   10),
+  RATE_LIMIT_SECONDS       : parseInt(process.env.RATE_LIMIT_SECONDS        || "10",   10),
+  MAX_EXECUTION_TIME_MS    : parseInt(process.env.MAX_EXECUTION_TIME_MS     || "15000",10),
+  MAX_TOTAL_EXECUTIONS     : parseInt(process.env.MAX_TOTAL_EXECUTIONS      || "200",  10),
+  COOLDOWN_SECONDS         : parseInt(process.env.COOLDOWN_SECONDS          || "5",    10),
+  SAFE_MODE                : (process.env.SAFE_MODE  ?? "true") === "true",
+  AGENT_ENABLED            : (process.env.AGENT_ENABLED ?? "true") === "true",
+  SAFE_MODE_MAX            : 20,   // SAFE_MODE hard cap (not configurable by design)
+  FREE_LIMIT               : 30,   // free-tier questions per 24hr window
+  FREE_WINDOW_MS           : 24 * 60 * 60 * 1000,
+  PORT                     : parseInt(process.env.PORT || "3001", 10),
+};
+
+// ============================================================
+// SAFEGUARD 6 — STRUCTURED LOGGER
+// Every execution is logged with timestamp, input summary,
+// and duration. Logs appear in Railway's log viewer.
+// High-frequency warning fires at > 10 executions / minute.
+// ============================================================
+const executionLog = []; // rolling 1-minute window
+
+function log(level, msg, meta = {}) {
+  const ts = new Date().toISOString();
+  console.log(`[${ts}] [${level}] ${msg}`, Object.keys(meta).length ? JSON.stringify(meta) : "");
+}
+
+function recordExecution(inputSummary, durationMs) {
+  const now = Date.now();
+  executionLog.push(now);
+  // Keep only last 60 seconds in the rolling window
+  while (executionLog.length && executionLog[0] < now - 60_000) executionLog.shift();
+  log("INFO", "Execution recorded", { input: inputSummary?.slice(0, 80), durationMs, execsLastMinute: executionLog.length });
+  // Safeguard 6: high-frequency warning
+  if (executionLog.length > 10) {
+    log("WARN", `WARNING: High execution frequency detected — ${executionLog.length} executions in last 60s`);
+  }
+}
+
+// ============================================================
+// SAFEGUARD 1 — GLOBAL EXECUTION COUNTERS
+// hourlyCount resets every 60 minutes.
+// totalCount NEVER resets — it is the absolute system cap.
+// ============================================================
+let hourlyCount  = 0;
+let hourlyReset  = Date.now() + 60 * 60 * 1000;
+let totalCount   = 0;
+
+function checkGlobalLimits() {
+  // Safeguard 1a: hourly limit
+  const now = Date.now();
+  if (now > hourlyReset) { hourlyCount = 0; hourlyReset = now + 60 * 60 * 1000; }
+  if (hourlyCount >= CFG.MAX_EXECUTIONS_PER_HOUR) {
+    log("ERROR", "Hourly execution limit reached", { hourlyCount, limit: CFG.MAX_EXECUTIONS_PER_HOUR });
+    return { allowed: false, reason: "Hourly execution limit reached. Please try again later." };
+  }
+  // Safeguard 1b + 8 (SAFE_MODE): total / safe-mode cap
+  const cap = CFG.SAFE_MODE ? Math.min(CFG.MAX_TOTAL_EXECUTIONS, CFG.SAFE_MODE_MAX) : CFG.MAX_TOTAL_EXECUTIONS;
+  if (totalCount >= cap) {
+    log("ERROR", "Global execution cap reached", { totalCount, cap, safeMode: CFG.SAFE_MODE });
+    return { allowed: false, reason: CFG.SAFE_MODE
+      ? `Safe mode cap reached (${cap} executions). Set SAFE_MODE=false to increase limit.`
+      : "Global execution cap reached. Contact administrator." };
+  }
+  return { allowed: true };
+}
+
+function incrementCounters() {
+  hourlyCount++;
+  totalCount++;
+}
+
+// ============================================================
+// SAFEGUARD 2 + 10 — RATE LIMITING + COOLDOWN (per-IP)
+// Minimum RATE_LIMIT_SECONDS between requests per IP.
+// COOLDOWN_SECONDS enforced after each execution completes.
+// ============================================================
+const lastRequestTime = new Map(); // ip -> timestamp of last completion
+const inCooldown      = new Map(); // ip -> timestamp when cooldown ends
+
+function checkRateAndCooldown(ip) {
+  const now = Date.now();
+  // Cooldown check (post-execution waiting period)
+  const cooldownEnd = inCooldown.get(ip) || 0;
+  if (now < cooldownEnd) {
+    const waitSecs = ((cooldownEnd - now) / 1000).toFixed(1);
+    return { allowed: false, reason: `Cooldown active. Please wait ${waitSecs}s before next request.` };
+  }
+  // Rate limit check (minimum gap between requests)
+  const lastTime = lastRequestTime.get(ip) || 0;
+  const gapSecs  = (now - lastTime) / 1000;
+  if (lastTime && gapSecs < CFG.RATE_LIMIT_SECONDS) {
+    const waitSecs = (CFG.RATE_LIMIT_SECONDS - gapSecs).toFixed(1);
+    return { allowed: false, reason: `Rate limit exceeded. Try again in ${waitSecs}s.` };
+  }
+  return { allowed: true };
+}
+
+function startCooldown(ip) {
+  const now = Date.now();
+  lastRequestTime.set(ip, now);
+  inCooldown.set(ip, now + CFG.COOLDOWN_SECONDS * 1000);
+}
+
+// Clean up stale rate-limit entries hourly (not a background agent loop —
+// just memory hygiene to prevent unbounded Map growth on Railway)
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [ip, t] of lastRequestTime.entries()) { if (t < cutoff) lastRequestTime.delete(ip); }
+  for (const [ip, t] of inCooldown.entries())      { if (t < cutoff) inCooldown.delete(ip); }
+}, 60 * 60 * 1000);
+
+// ============================================================
+// SAFEGUARD 5 — REQUEST DEDUPLICATION + CACHING (30s)
+// Identical inputs return cached result without re-running AI.
+// ============================================================
+const requestCache = new Map(); // hash -> { result, expiresAt }
+
+function cacheKey(messages, userId) {
+  const lastMsg = messages?.[messages.length - 1]?.content || "";
+  const text = typeof lastMsg === "string" ? lastMsg : JSON.stringify(lastMsg);
+  return `${userId || "free"}:${text.slice(0, 200)}`;
+}
+
+function getCached(key) {
+  const entry = requestCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { requestCache.delete(key); return null; }
+  return entry.result;
+}
+
+function setCache(key, result) {
+  requestCache.set(key, { result, expiresAt: Date.now() + 30_000 });
+  // Prevent unbounded cache growth — cap at 100 entries
+  if (requestCache.size > 100) {
+    const oldest = requestCache.keys().next().value;
+    requestCache.delete(oldest);
+  }
+}
+
+// ============================================================
+// SAFEGUARD 4 — EXECUTION TIMEOUT WRAPPER
+// Wraps any async function. If it doesn't resolve within
+// MAX_EXECUTION_TIME_MS, rejects with timeout error.
+// ============================================================
+function withTimeout(promise) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Execution timeout after ${CFG.MAX_EXECUTION_TIME_MS}ms`));
+    }, CFG.MAX_EXECUTION_TIME_MS);
+    promise.then(
+      val => { clearTimeout(timer); resolve(val); },
+      err => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
+// ============================================================
+// FREE-TIER LIMIT (existing logic, preserved)
+// ============================================================
+const freeUsage = new Map();
 
 function checkFreeLimit(ip) {
   const now = Date.now();
   const entry = freeUsage.get(ip);
   if (!entry || now > entry.resetAt) {
-    freeUsage.set(ip, { count: 1, resetAt: now + FREE_WINDOW_MS });
-    return { allowed: true, remaining: FREE_LIMIT - 1, resetAt: now + FREE_WINDOW_MS };
+    freeUsage.set(ip, { count: 1, resetAt: now + CFG.FREE_WINDOW_MS });
+    return { allowed: true, remaining: CFG.FREE_LIMIT - 1, resetAt: now + CFG.FREE_WINDOW_MS };
   }
-  if (entry.count >= FREE_LIMIT) {
+  if (entry.count >= CFG.FREE_LIMIT) {
     const hoursLeft = Math.ceil((entry.resetAt - now) / (1000 * 60 * 60));
     return { allowed: false, remaining: 0, resetAt: entry.resetAt, hoursLeft };
   }
   entry.count++;
-  return { allowed: true, remaining: FREE_LIMIT - entry.count, resetAt: entry.resetAt };
+  return { allowed: true, remaining: CFG.FREE_LIMIT - entry.count, resetAt: entry.resetAt };
 }
 
-// Clean up expired entries every hour
+// Hourly cleanup — NOT an agent loop, just Map memory management
 setInterval(() => {
   const now = Date.now();
-  for (const [ip, entry] of freeUsage.entries()) {
-    if (now > entry.resetAt) freeUsage.delete(ip);
-  }
+  for (const [ip, e] of freeUsage.entries()) { if (now > e.resetAt) freeUsage.delete(ip); }
 }, 60 * 60 * 1000);
 
+// ============================================================
+// APP + MIDDLEWARE
+// ============================================================
 const app = express();
-const PORT = process.env.PORT || 3001;
 
-// ── Supabase client (service role — bypasses RLS) ─────────────
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-// ── Middleware ─────────────────────────────────────────────────
 app.use(express.json({ limit: "50mb" }));
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
@@ -51,131 +211,269 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
-const limiter = rateLimit({
-  windowMs: 60 * 1000, max: 60,
+// Express-level rate limiter (outer layer — 60 req/min per IP for all routes)
+const { rateLimit } = require("express-rate-limit");
+app.use("/api/", rateLimit({
+  windowMs: 60_000, max: 60,
   message: { error: "Too many requests. Please wait and try again." },
   standardHeaders: true, legacyHeaders: false,
-});
-app.use("/api/", limiter);
+}));
 
-// ── Health check ───────────────────────────────────────────────
+// Supabase
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// ============================================================
+// HELPER: get client IP consistently behind Railway proxy
+// ============================================================
+function getIP(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.socket?.remoteAddress
+    || "unknown";
+}
+
+// ============================================================
+// SAFEGUARD 9 — GLOBAL EMERGENCY STOP MIDDLEWARE
+// If AGENT_ENABLED=false in Railway env vars, ALL /api/chat
+// requests are blocked immediately — no code runs.
+// ============================================================
+function agentGuard(req, res, next) {
+  if (!CFG.AGENT_ENABLED) {
+    log("WARN", "Agent disabled — request blocked", { path: req.path });
+    return res.status(503).json({ error: "Agent is currently disabled. Contact administrator." });
+  }
+  next();
+}
+
+// ============================================================
+// HEALTH CHECK — exposes current safeguard state for monitoring
+// ============================================================
 app.get("/api/health", (req, res) => {
   res.json({
-    status: "ok", name: "Ace Venturi: Controls Detective", version: "2.0.0",
-    apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
-    supabaseConfigured: !!process.env.SUPABASE_URL,
-    clerkConfigured: !!process.env.CLERK_SECRET_KEY,
+    status        : CFG.AGENT_ENABLED ? "ok" : "disabled",
+    name          : "Agent Venturi: Phoenix Controls Expert",
+    version       : "3.0.0",
+    safeguards    : {
+      agentEnabled         : CFG.AGENT_ENABLED,
+      safeMode             : CFG.SAFE_MODE,
+      hourlyCount,
+      hourlyLimit          : CFG.MAX_EXECUTIONS_PER_HOUR,
+      totalCount,
+      totalLimit           : CFG.SAFE_MODE ? Math.min(CFG.MAX_TOTAL_EXECUTIONS, CFG.SAFE_MODE_MAX) : CFG.MAX_TOTAL_EXECUTIONS,
+      rateLimitSecs        : CFG.RATE_LIMIT_SECONDS,
+      cooldownSecs         : CFG.COOLDOWN_SECONDS,
+      maxExecutionMs       : CFG.MAX_EXECUTION_TIME_MS,
+      execsLastMinute      : executionLog.length,
+      cacheSize            : requestCache.size,
+    },
+    configured    : {
+      apiKey    : !!process.env.ANTHROPIC_API_KEY,
+      supabase  : !!process.env.SUPABASE_URL,
+      clerk     : !!process.env.CLERK_SECRET_KEY,
+    },
   });
 });
 
-// ── Helper: upsert user in Supabase ───────────────────────────
-async function ensureUser(clerkUserId, email, fullName) {
-  const { data, error } = await supabase
-    .from("users")
-    .upsert({ id: clerkUserId, email, full_name: fullName }, { onConflict: "id" })
-    .select().single();
-  if (error) console.error("ensureUser error:", error);
-  return data;
-}
-
-// ══════════════════════════════════════════════════════════════
-// AI CHAT PROXY — supports both signed-in and free users
-// ══════════════════════════════════════════════════════════════
-app.post("/api/chat", ClerkExpressWithAuth(), async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured." });
-
-  const isSignedIn = !!req.auth?.userId;
-
-  // Free users: enforce 10 questions per 24hrs
-  if (!isSignedIn) {
-    const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
-    const check = checkFreeLimit(ip);
-    if (!check.allowed) {
-      return res.status(429).json({
-        error: `Free limit reached. You've used all ${FREE_LIMIT} free questions for this session. Resets in ${check.hoursLeft} hour${check.hoursLeft === 1 ? "" : "s"}.`,
-        freeLimit: true,
-        resetAt: check.resetAt,
-        hoursLeft: check.hoursLeft,
-      });
-    }
-    // Include remaining count in response headers
-    res.setHeader("X-Free-Remaining", check.remaining);
-    res.setHeader("X-Free-Reset", check.resetAt);
+// ============================================================
+// SAFEGUARD 9 — EMERGENCY STOP ENDPOINT
+// POST /api/admin/stop with correct admin token disables agent
+// without requiring a redeploy (env var toggle via Railway UI
+// is the primary method — this is a programmatic backup).
+// ============================================================
+app.post("/api/admin/stop", (req, res) => {
+  const token = req.headers["x-admin-token"];
+  if (!token || token !== process.env.ADMIN_TOKEN) {
+    return res.status(403).json({ error: "Forbidden" });
   }
-
-  try {
-    const { messages, system, tools, max_tokens, model } = req.body;
-    if (!messages || !Array.isArray(messages))
-      return res.status(400).json({ error: "Invalid request: messages array required." });
-    const payload = { model: model || "claude-sonnet-4-6", max_tokens: max_tokens || 8000, system, messages };
-    if (tools && tools.length > 0) payload.tools = tools;
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "API error" });
-    res.json(data);
-  } catch (err) {
-    console.error("Chat proxy error:", err);
-    res.status(500).json({ error: "Server error: " + err.message });
-  }
+  CFG.AGENT_ENABLED = false;
+  log("WARN", "EMERGENCY STOP triggered via admin endpoint");
+  res.json({ ok: true, message: "Agent disabled. Set AGENT_ENABLED=true in Railway to re-enable." });
 });
 
-// ── User sync ─────────────────────────────────────────────────
+// ============================================================
+// SAFEGUARD 6 — STATS ENDPOINT (Railway log supplement)
+// ============================================================
+app.get("/api/admin/stats", (req, res) => {
+  const token = req.headers["x-admin-token"];
+  if (!token || token !== process.env.ADMIN_TOKEN) return res.status(403).json({ error: "Forbidden" });
+  res.json({ hourlyCount, totalCount, execsLastMinute: executionLog.length, cacheEntries: requestCache.size, safeModeActive: CFG.SAFE_MODE, agentEnabled: CFG.AGENT_ENABLED });
+});
+
+// ============================================================
+// MAIN AI CHAT ROUTE — all safeguards applied in order
+// ============================================================
+app.post("/api/chat", agentGuard, ClerkExpressWithAuth(), async (req, res) => {
+  const startTime = Date.now();
+  const ip        = getIP(req);
+  const isSignedIn = !!req.auth?.userId;
+  const userId    = req.auth?.userId || null;
+
+  // ── Safeguard 9: agent enabled check (also in middleware above) ──
+  if (!CFG.AGENT_ENABLED) {
+    return res.status(503).json({ error: "Agent is currently disabled." });
+  }
+
+  // ── Safeguard 1: global execution limits ──────────────────────
+  const limitCheck = checkGlobalLimits();
+  if (!limitCheck.allowed) {
+    return res.status(429).json({ error: limitCheck.reason });
+  }
+
+  // ── Safeguard 2 + 10: rate limit + cooldown ───────────────────
+  const rateCheck = checkRateAndCooldown(ip);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({ error: rateCheck.reason });
+  }
+
+  // ── Free tier check ───────────────────────────────────────────
+  if (!isSignedIn) {
+    const freeCheck = checkFreeLimit(ip);
+    if (!freeCheck.allowed) {
+      return res.status(429).json({
+        error     : `Free session limit reached. You've used all ${CFG.FREE_LIMIT} free questions. Resets in ${freeCheck.hoursLeft} hour${freeCheck.hoursLeft === 1 ? "" : "s"}.`,
+        freeLimit : true,
+        resetAt   : freeCheck.resetAt,
+        hoursLeft : freeCheck.hoursLeft,
+      });
+    }
+    res.setHeader("X-Free-Remaining", freeCheck.remaining);
+    res.setHeader("X-Free-Reset",     freeCheck.resetAt);
+  }
+
+  // ── Validate request ──────────────────────────────────────────
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured on server." });
+
+  const { messages, system, tools, max_tokens, model } = req.body;
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "Invalid request: messages array required." });
+  }
+
+  // ── Safeguard 5: deduplication cache ─────────────────────────
+  const cKey    = cacheKey(messages, userId);
+  const cached  = getCached(cKey);
+  if (cached) {
+    log("INFO", "Cache hit — returning cached result", { ip, userId });
+    return res.json(cached);
+  }
+
+  // ── Increment counters BEFORE execution ───────────────────────
+  incrementCounters();
+
+  // ── Safeguard 4 + 7: timeout + single retry ───────────────────
+  const runAI = async () => {
+    const payload = {
+      model      : model || "claude-sonnet-4-6",
+      max_tokens : max_tokens || 8000,
+      system,
+      messages,
+    };
+    if (tools && tools.length > 0) payload.tools = tools;
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method  : "POST",
+      headers : {
+        "Content-Type"      : "application/json",
+        "x-api-key"         : apiKey,
+        "anthropic-version" : "2023-06-01",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Anthropic API error ${response.status}`);
+    return data;
+  };
+
+  let result = null;
+  let lastError = null;
+
+  // Safeguard 7: ONE retry maximum — no recursive loops
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      result = await withTimeout(runAI()); // Safeguard 4: hard timeout
+      break; // success — exit retry loop
+    } catch (err) {
+      lastError = err;
+      log("WARN", `Attempt ${attempt} failed`, { ip, error: err.message });
+      if (attempt === 2) break; // Safeguard 7: no more retries
+      // Brief pause between retry attempts (not a loop — single await)
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  // ── Post-execution: cooldown + logging + cache ────────────────
+  const duration = Date.now() - startTime;
+  startCooldown(ip);                              // Safeguard 10
+  recordExecution(                                // Safeguard 6
+    messages[messages.length - 1]?.content?.slice?.(0, 80) || "[image/complex]",
+    duration
+  );
+
+  if (!result) {
+    log("ERROR", "All attempts failed", { ip, error: lastError?.message });
+    // Safeguard 12: fail-safe — default to STOP, return error
+    return res.status(500).json({ error: lastError?.message || "Execution failed after retry." });
+  }
+
+  // Cache successful result
+  setCache(cKey, result);                         // Safeguard 5
+
+  log("INFO", "Chat execution complete", { ip, userId, durationMs: duration, hourlyCount, totalCount });
+  res.json(result);
+});
+
+// ============================================================
+// USER SYNC
+// ============================================================
 app.post("/api/user/sync", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { userId, email, fullName } = req.body;
-    await ensureUser(userId, email, fullName);
+    await supabase.from("users")
+      .upsert({ id: userId, email, full_name: fullName }, { onConflict: "id" })
+      .select().single();
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Free tier status (no auth required) ──────────────────────
+// ── Free tier status ──────────────────────────────────────────
 app.get("/api/free-status", (req, res) => {
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
+  const ip    = getIP(req);
+  const now   = Date.now();
   const entry = freeUsage.get(ip);
-  if (!entry || now > entry.resetAt) {
-    return res.json({ used: 0, remaining: FREE_LIMIT, limit: FREE_LIMIT, resetAt: now + FREE_WINDOW_MS });
-  }
-  res.json({ used: entry.count, remaining: Math.max(0, FREE_LIMIT - entry.count), limit: FREE_LIMIT, resetAt: entry.resetAt });
+  if (!entry || now > entry.resetAt)
+    return res.json({ used: 0, remaining: CFG.FREE_LIMIT, limit: CFG.FREE_LIMIT, resetAt: now + CFG.FREE_WINDOW_MS });
+  res.json({ used: entry.count, remaining: Math.max(0, CFG.FREE_LIMIT - entry.count), limit: CFG.FREE_LIMIT, resetAt: entry.resetAt });
 });
 
-// ══════════════════════════════════════════════════════════════
-// CHAT ROUTES
-// ══════════════════════════════════════════════════════════════
+// ============================================================
+// CHAT ROUTES (auth required — no safeguard overhead needed,
+// these are just DB reads/writes not AI executions)
+// ============================================================
 app.get("/api/chats", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { data, error } = await supabase.from("chats")
-      .select("id, title, created_at, updated_at")
-      .eq("user_id", req.auth.userId)
+      .select("id, title, created_at, updated_at").eq("user_id", req.auth.userId)
       .order("updated_at", { ascending: false });
-    if (error) throw error;
-    res.json(data);
+    if (error) throw error; res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/api/chats", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { data, error } = await supabase.from("chats")
-      .insert({ user_id: req.auth.userId, title: req.body.title || "New chat" })
-      .select().single();
-    if (error) throw error;
-    res.json(data);
+      .insert({ user_id: req.auth.userId, title: req.body.title || "New chat" }).select().single();
+    if (error) throw error; res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.patch("/api/chats/:id", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { data, error } = await supabase.from("chats")
-      .update({ title: req.body.title })
-      .eq("id", req.params.id).eq("user_id", req.auth.userId)
-      .select().single();
-    if (error) throw error;
-    res.json(data);
+      .update({ title: req.body.title }).eq("id", req.params.id).eq("user_id", req.auth.userId).select().single();
+    if (error) throw error; res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -183,8 +481,7 @@ app.delete("/api/chats/:id", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { error } = await supabase.from("chats")
       .delete().eq("id", req.params.id).eq("user_id", req.auth.userId);
-    if (error) throw error;
-    res.json({ ok: true });
+    if (error) throw error; res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -194,117 +491,84 @@ app.get("/api/chats/:id/messages", ClerkExpressRequireAuth(), async (req, res) =
       .select("id").eq("id", req.params.id).eq("user_id", req.auth.userId).single();
     if (chatErr || !chat) return res.status(404).json({ error: "Chat not found" });
     const { data, error } = await supabase.from("messages")
-      .select("id, role, content, images, created_at")
-      .eq("chat_id", req.params.id)
+      .select("id, role, content, images, created_at").eq("chat_id", req.params.id)
       .order("created_at", { ascending: true });
-    if (error) throw error;
-    res.json(data);
+    if (error) throw error; res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/api/chats/:id/messages", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { role, content, images } = req.body;
-    await supabase.from("chats")
-      .update({ updated_at: new Date().toISOString() })
+    await supabase.from("chats").update({ updated_at: new Date().toISOString() })
       .eq("id", req.params.id).eq("user_id", req.auth.userId);
     const { data, error } = await supabase.from("messages")
       .insert({ chat_id: req.params.id, user_id: req.auth.userId, role, content, images: images || null })
       .select().single();
-    if (error) throw error;
-    res.json(data);
+    if (error) throw error; res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-// ALARM LOG ROUTES
-// ══════════════════════════════════════════════════════════════
+// ============================================================
+// ALARM ROUTES
+// ============================================================
 app.get("/api/alarms", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("alarm_logs").select("*")
-      .eq("user_id", req.auth.userId).order("created_at", { ascending: false });
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("alarm_logs").select("*").eq("user_id", req.auth.userId).order("created_at", { ascending: false }); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.post("/api/alarms", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("alarm_logs")
-      .insert({ ...req.body, user_id: req.auth.userId }).select().single();
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("alarm_logs").insert({ ...req.body, user_id: req.auth.userId }).select().single(); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.patch("/api/alarms/:id", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("alarm_logs")
-      .update(req.body).eq("id", req.params.id).eq("user_id", req.auth.userId).select().single();
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("alarm_logs").update(req.body).eq("id", req.params.id).eq("user_id", req.auth.userId).select().single(); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.delete("/api/alarms/:id", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    await supabase.from("alarm_logs").delete().eq("id", req.params.id).eq("user_id", req.auth.userId);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await supabase.from("alarm_logs").delete().eq("id", req.params.id).eq("user_id", req.auth.userId); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
+// ============================================================
 // EQUIPMENT ROUTES
-// ══════════════════════════════════════════════════════════════
+// ============================================================
 app.get("/api/equipment", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("equipment").select("*")
-      .eq("user_id", req.auth.userId).order("created_at", { ascending: false });
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("equipment").select("*").eq("user_id", req.auth.userId).order("created_at", { ascending: false }); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.post("/api/equipment", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("equipment")
-      .insert({ ...req.body, user_id: req.auth.userId }).select().single();
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("equipment").insert({ ...req.body, user_id: req.auth.userId }).select().single(); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.patch("/api/equipment/:id", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("equipment")
-      .update(req.body).eq("id", req.params.id).eq("user_id", req.auth.userId).select().single();
-    if (error) throw error;
-    res.json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const { data, error } = await supabase.from("equipment").update(req.body).eq("id", req.params.id).eq("user_id", req.auth.userId).select().single(); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 app.delete("/api/equipment/:id", ClerkExpressRequireAuth(), async (req, res) => {
-  try {
-    await supabase.from("equipment").delete().eq("id", req.params.id).eq("user_id", req.auth.userId);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await supabase.from("equipment").delete().eq("id", req.params.id).eq("user_id", req.auth.userId); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Serve React build in production ───────────────────────────
+// ============================================================
+// SAFEGUARD 11 — RAILWAY-SPECIFIC: serve React build only
+// No agent code runs on startup. No auto-trigger on deploy.
+// ============================================================
 if (process.env.NODE_ENV === "production") {
   const path = require("path");
   app.use(express.static(path.join(__dirname, "../build")));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../build", "index.html"));
-  });
+  app.get("*", (req, res) => res.sendFile(path.join(__dirname, "../build", "index.html")));
 }
 
-// ── Start ──────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🕵️  Ace Venturi: Controls Detective v2.0`);
-  console.log(`   Port      : ${PORT}`);
-  console.log(`   Auth      : ${process.env.CLERK_SECRET_KEY ? "✓ Clerk" : "✗ CLERK_SECRET_KEY missing"}`);
-  console.log(`   Database  : ${process.env.SUPABASE_URL ? "✓ Supabase" : "✗ SUPABASE_URL missing"}`);
-  console.log(`   API Key   : ${process.env.ANTHROPIC_API_KEY ? "✓ Set" : "✗ NOT SET"}`);
-  console.log(`   Mode      : ${process.env.NODE_ENV || "development"}\n`);
+// ============================================================
+// STARTUP — log config summary (agent does NOT run on startup)
+// ============================================================
+app.listen(CFG.PORT, () => {
+  console.log(`\n🔍 Agent Venturi: Phoenix Controls Expert v3.0`);
+  console.log(`   Port          : ${CFG.PORT}`);
+  console.log(`   Auth          : ${process.env.CLERK_SECRET_KEY ? "✓ Clerk" : "✗ CLERK_SECRET_KEY missing"}`);
+  console.log(`   Database      : ${process.env.SUPABASE_URL    ? "✓ Supabase" : "✗ SUPABASE_URL missing"}`);
+  console.log(`   API Key       : ${process.env.ANTHROPIC_API_KEY ? "✓ Set" : "✗ NOT SET"}`);
+  console.log(`   Mode          : ${process.env.NODE_ENV || "development"}`);
+  console.log(`\n   ── Safeguards Active ──────────────────────────────`);
+  console.log(`   Agent Enabled : ${CFG.AGENT_ENABLED}`);
+  console.log(`   Safe Mode     : ${CFG.SAFE_MODE} (cap: ${CFG.SAFE_MODE ? CFG.SAFE_MODE_MAX : "off"})`);
+  console.log(`   Hourly Limit  : ${CFG.MAX_EXECUTIONS_PER_HOUR} executions/hr`);
+  console.log(`   Total Cap     : ${CFG.MAX_TOTAL_EXECUTIONS} executions`);
+  console.log(`   Rate Limit    : ${CFG.RATE_LIMIT_SECONDS}s between requests`);
+  console.log(`   Cooldown      : ${CFG.COOLDOWN_SECONDS}s after each execution`);
+  console.log(`   Timeout       : ${CFG.MAX_EXECUTION_TIME_MS}ms per execution`);
+  console.log(`   ────────────────────────────────────────────────────\n`);
+  console.log(`   ⚠  Agent does NOT run on startup — awaiting requests only\n`);
 });
