@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Environment — NEVER commit this
+.env
+
+# React build output
+build/
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*
