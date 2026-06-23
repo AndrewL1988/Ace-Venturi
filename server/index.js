@@ -345,173 +345,137 @@ app.post("/api/feedback", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// RAG SETUP ENDPOINT — one-time admin endpoint to embed and load
-// all knowledge chunks into Supabase. Protected by RAG_SETUP_KEY.
-// Usage: GET /api/admin/setup-rag?key=YOUR_RAG_SETUP_KEY
+// RAG SETUP ENDPOINT
 // ═══════════════════════════════════════════════════════════════
 app.get("/api/admin/setup-rag", async (req, res) => {
-  // ── Auth check ────────────────────────────────────────────────
   const setupKey = process.env.RAG_SETUP_KEY;
-  if (!setupKey) {
-    return res.status(500).json({ error: "RAG_SETUP_KEY not set in environment variables." });
-  }
-  if (req.query.key !== setupKey) {
-    return res.status(403).json({ error: "Invalid setup key." });
-  }
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: "OPENAI_API_KEY not set in environment variables." });
-  }
-  if (!supabase) {
-    return res.status(500).json({ error: "Supabase not configured." });
+  if (!setupKey) return res.status(500).json({ error: "RAG_SETUP_KEY not set." });
+  if (req.query.key !== setupKey) return res.status(403).json({ error: "Invalid setup key." });
+  if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY not set." });
+  if (!supabase) return res.status(500).json({ error: "Supabase not configured." });
+
+  // Check how many chunks already exist
+  let existingCount = 0;
+  try {
+    const { count } = await supabase.from("knowledge_chunks").select("*", { count: "exact", head: true });
+    existingCount = count || 0;
+  } catch (e) {
+    return res.status(500).json({ error: "Cannot query Supabase: " + e.message });
   }
 
-  // ── Check if already loaded ───────────────────────────────────
-  const { count, error: countError } = await supabase
-    .from("knowledge_chunks")
-    .select("*", { count: "exact", head: true });
-
-  if (!countError && count >= 55) {
+  if (existingCount >= 55) {
     return res.json({
       status: "already_loaded",
-      message: `Knowledge base already loaded with ${count} chunks. Set RAG_ENABLED=true in Railway to activate.`,
-      chunks: count,
+      chunks: existingCount,
+      message: "Knowledge base already loaded. Set RAG_ENABLED=true in Railway to activate.",
     });
   }
 
-  // ── Start embedding process ───────────────────────────────────
-  log("INFO", "RAG setup started", { existingChunks: count || 0 });
-
-  // Send immediate response so Railway doesn't timeout
-  // The process continues in the background
+  // Respond immediately — background process handles embedding
   res.json({
     status: "started",
-    message: "RAG setup started. Check /api/admin/setup-rag-status for progress. This takes ~60 seconds.",
-    tip: "After completion, set RAG_ENABLED=true in Railway Variables to activate RAG.",
+    existing_chunks: existingCount,
+    message: "Embedding started in background (~60 seconds). Check /api/admin/setup-rag-status for progress.",
   });
 
-  // ── Run embedding in background ───────────────────────────────
+  // Background embedding
   (async () => {
+    let loaded = 0, failed = 0;
+    const errors = [];
     try {
       const chunks = require("./knowledge_chunks.json");
-      let loaded = 0;
-      let failed = 0;
-      const errors = [];
 
       for (const chunk of chunks) {
         try {
-          // Check if this chunk already exists
+          // Check if chunk already exists — use maybeSingle() to avoid errors on no rows
           const { data: existing } = await supabase
             .from("knowledge_chunks")
             .select("id")
             .eq("id", chunk.id)
-            .single();
+            .maybeSingle();
 
-          if (existing) {
-            loaded++;
-            continue; // Skip already-loaded chunks
-          }
+          if (existing) { loaded++; continue; }
 
-          // Embed the chunk
-          const text = `${chunk.topic}
-Tags: ${chunk.tags.join(", ")}
-
-${chunk.content}`;
-          const resp = await openaiClient.embeddings.create({
-            model: "text-embedding-3-small",
-            input: text,
-          });
+          // Embed
+          const text = chunk.topic + "\nTags: " + chunk.tags.join(", ") + "\n\n" + chunk.content;
+          const resp = await openaiClient.embeddings.create({ model: "text-embedding-3-small", input: text });
           const embedding = resp.data[0].embedding;
 
-          // Store in Supabase
-          const { error: upsertError } = await supabase
-            .from("knowledge_chunks")
-            .upsert({
-              id: chunk.id,
-              topic: chunk.topic,
-              category: chunk.category,
-              tags: chunk.tags,
-              content: chunk.content,
-              embedding,
-            });
+          // Upsert
+          const { error: upsertErr } = await supabase.from("knowledge_chunks").upsert({
+            id: chunk.id, topic: chunk.topic, category: chunk.category,
+            tags: chunk.tags, content: chunk.content, embedding,
+          });
 
-          if (upsertError) {
-            errors.push(`${chunk.id}: ${upsertError.message}`);
-            failed++;
-          } else {
-            loaded++;
-          }
+          if (upsertErr) { errors.push(chunk.id + ": " + upsertErr.message); failed++; }
+          else loaded++;
 
-          // Small delay to avoid OpenAI rate limits
           await new Promise(r => setTimeout(r, 150));
-
-        } catch (chunkErr) {
-          errors.push(`${chunk.id}: ${chunkErr.message}`);
+        } catch (err) {
+          errors.push(chunk.id + ": " + err.message);
           failed++;
         }
       }
 
-      // Store final status in Supabase for the status endpoint to read
-      await supabase.from("rag_setup_status").upsert({
-        id: "latest",
-        status: failed === 0 ? "complete" : "complete_with_errors",
-        loaded,
-        failed,
-        errors: errors.slice(0, 10), // store first 10 errors
-        completed_at: new Date().toISOString(),
-      }).catch(() => {}); // ignore if table doesn't exist
+      // Save status
+      try {
+        await supabase.from("rag_setup_status").upsert({
+          id: "latest",
+          status: failed === 0 ? "complete" : "complete_with_errors",
+          loaded, failed,
+          errors: errors.slice(0, 10),
+          completed_at: new Date().toISOString(),
+        });
+      } catch {}
 
-      log("INFO", `RAG setup complete: ${loaded} loaded, ${failed} failed`, { errors });
-
+      log("INFO", "RAG setup complete", { loaded, failed });
     } catch (e) {
-      log("ERROR", "RAG setup background process failed", { error: e.message });
+      log("ERROR", "RAG background embed failed", { error: e.message });
     }
   })();
 });
 
-// ── RAG setup status endpoint ──────────────────────────────────
+// ── RAG status endpoint ─────────────────────────────────────────
 app.get("/api/admin/setup-rag-status", async (req, res) => {
   const setupKey = process.env.RAG_SETUP_KEY;
-  if (!setupKey || req.query.key !== setupKey) {
-    return res.status(403).json({ error: "Invalid setup key." });
-  }
+  if (!setupKey || req.query.key !== setupKey) return res.status(403).json({ error: "Invalid setup key." });
 
   try {
-    // Check current chunk count
-    const { count } = await supabase
-      .from("knowledge_chunks")
-      .select("*", { count: "exact", head: true });
+    // Get chunk count
+    const { count } = await supabase.from("knowledge_chunks").select("*", { count: "exact", head: true });
+    const chunkCount = count || 0;
 
-    // Try to get status record
+    // Get status record safely with maybeSingle()
     let statusRecord = null;
     try {
       const { data } = await supabase
         .from("rag_setup_status")
         .select("*")
         .eq("id", "latest")
-        .single();
+        .maybeSingle();
       statusRecord = data;
     } catch {}
 
-    if (statusRecord?.status === "complete" || statusRecord?.status === "complete_with_errors") {
+    if (statusRecord && (statusRecord.status === "complete" || statusRecord.status === "complete_with_errors")) {
       return res.json({
         status: statusRecord.status,
-        chunks_in_db: count,
+        chunks_in_db: chunkCount,
         loaded: statusRecord.loaded,
         failed: statusRecord.failed,
-        errors: statusRecord.errors,
+        errors: statusRecord.errors || [],
         completed_at: statusRecord.completed_at,
-        next_step: count >= 55
-          ? "✅ Done! Set RAG_ENABLED=true in Railway Variables to activate RAG."
-          : `⚠️ Only ${count} chunks loaded. Hit setup-rag again to load remaining chunks.`,
+        next_step: chunkCount >= 55
+          ? "Done! Set RAG_ENABLED=true in Railway Variables to activate RAG."
+          : "Only " + chunkCount + " chunks loaded — hit setup-rag again to finish.",
       });
     }
 
     return res.json({
-      status: count > 0 ? "in_progress" : "not_started",
-      chunks_in_db: count,
-      message: count > 0
-        ? `${count} chunks loaded so far. Still running...`
-        : "Setup not started or still initializing.",
+      status: chunkCount > 0 ? "in_progress" : "not_started",
+      chunks_in_db: chunkCount,
+      message: chunkCount > 0
+        ? chunkCount + " chunks loaded so far. Still running or hit setup-rag again."
+        : "Not started yet — hit /api/admin/setup-rag first.",
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
