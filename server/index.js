@@ -8,6 +8,8 @@ const express = require("express");
 const cors    = require("cors");
 const fetch   = require("node-fetch");
 const { createClient }              = require("@supabase/supabase-js");
+const ws                             = require("ws");
+const OpenAI                         = require("openai");
 const { ClerkExpressRequireAuth,
         ClerkExpressWithAuth }       = require("@clerk/clerk-sdk-node");
 
@@ -17,12 +19,15 @@ const { ClerkExpressRequireAuth,
 // in Railway dashboard without touching code or redeploying.
 // ============================================================
 const CFG = {
-  MAX_EXECUTIONS_PER_HOUR : parseInt(process.env.MAX_EXECUTIONS_PER_HOUR  || "50",   10),
-  RATE_LIMIT_SECONDS       : parseInt(process.env.RATE_LIMIT_SECONDS        || "10",   10),
-  MAX_EXECUTION_TIME_MS    : parseInt(process.env.MAX_EXECUTION_TIME_MS     || "15000",10),
-  MAX_TOTAL_EXECUTIONS     : parseInt(process.env.MAX_TOTAL_EXECUTIONS      || "200",  10),
-  COOLDOWN_SECONDS         : parseInt(process.env.COOLDOWN_SECONDS          || "5",    10),
-  SAFE_MODE                : (process.env.SAFE_MODE  ?? "true") === "true",
+  MAX_EXECUTIONS_PER_HOUR : parseInt(process.env.MAX_EXECUTIONS_PER_HOUR  || "100",  10),
+  RATE_LIMIT_SECONDS       : parseInt(process.env.RATE_LIMIT_SECONDS        || "8",    10),
+  MAX_EXECUTION_TIME_MS    : parseInt(process.env.MAX_EXECUTION_TIME_MS     || "45000",10),
+  MAX_TOTAL_EXECUTIONS     : parseInt(process.env.MAX_TOTAL_EXECUTIONS      || "500",  10),
+  COOLDOWN_SECONDS         : parseInt(process.env.COOLDOWN_SECONDS          || "3",    10),
+  SAFE_MODE                : (process.env.SAFE_MODE  ?? "false") === "true",
+  RAG_ENABLED              : (process.env.RAG_ENABLED ?? "false") === "true",
+  RAG_CHUNKS               : parseInt(process.env.RAG_CHUNKS || "6", 10),
+  OPENAI_API_KEY           : process.env.OPENAI_API_KEY || null,
   AGENT_ENABLED            : (process.env.AGENT_ENABLED ?? "true") === "true",
   SAFE_MODE_MAX            : 20,   // SAFE_MODE hard cap (not configurable by design)
   FREE_LIMIT               : 30,   // free-tier questions per 24hr window
@@ -222,8 +227,68 @@ app.use("/api/", rateLimit({
 // Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    realtime: { transport: ws },
+    global: { headers: { "x-client-info": "agent-venturi/2.0" } },
+  }
 );
+
+// OpenAI — used only for RAG embeddings (not chat)
+const openaiClient = CFG.OPENAI_API_KEY ? new OpenAI({ apiKey: CFG.OPENAI_API_KEY }) : null;
+
+// ── RAG: retrieve relevant knowledge chunks for a question ──────────────────
+async function retrieveChunks(question) {
+  if (!CFG.RAG_ENABLED || !openaiClient || !supabase) return null;
+  try {
+    // 1. Embed the question
+    const resp = await openaiClient.embeddings.create({
+      model: "text-embedding-3-small",
+      input: question,
+    });
+    const embedding = resp.data[0].embedding;
+
+    // 2. Find closest chunks in Supabase via pgvector
+    const { data, error } = await supabase.rpc("match_knowledge_chunks", {
+      query_embedding: embedding,
+      match_count: CFG.RAG_CHUNKS,
+      match_threshold: 0.35,
+    });
+    if (error || !data || data.length === 0) return null;
+
+    // 3. Assemble context from retrieved chunks
+    const context = data.map(c =>
+      `## ${c.topic}
+${c.content}`
+    ).join("\n\n---\n\n");
+
+    log("INFO", `RAG: retrieved ${data.length} chunks`, {
+      chunks: data.map(c => `${c.id}(${c.similarity?.toFixed(2)})`).join(", ")
+    });
+
+    return context;
+  } catch (e) {
+    log("WARN", "RAG retrieval failed — falling back to full prompt", { error: e.message });
+    return null;
+  }
+}
+
+// Short instructions-only system prompt used as the RAG header
+const RAG_SYSTEM_HEADER = `You are Agent Venturi — the definitive Phoenix Controls HVAC expert. You are a senior field technician and systems engineer with encyclopedic knowledge of every Phoenix Controls product ever made.
+
+## RESPONSE STYLE
+- Direct, precise, and practical. Lead with the most actionable information first.
+- For troubleshooting: start with most likely cause, escalate systematically.
+- For procedures: number every step. Never stop partway through.
+- For image analysis: describe every visible element before interpreting.
+- Use correct model numbers, terminal designations, parameter names, and specifications.
+- When factory support is needed: recommend (800) 340-0007 or phoenixcontrols.com.
+- Sign off tough solves with quiet confidence — "That should have it" or "System should be back in normal operation."
+
+## KNOWLEDGE BASE
+The following sections contain relevant Phoenix Controls technical knowledge for this question. Use this information to provide accurate, complete answers.
+
+`;
 
 // ============================================================
 // HELPER: get client IP consistently behind Railway proxy
@@ -250,6 +315,209 @@ function agentGuard(req, res, next) {
 // ============================================================
 // HEALTH CHECK — exposes current safeguard state for monitoring
 // ============================================================
+// ── Feedback endpoint — stores thumbs up/down ratings for training review
+app.post("/api/feedback", async (req, res) => {
+  try {
+    const { rating, question, response, timestamp, userId } = req.body;
+    if (!rating || !["up", "down"].includes(rating)) {
+      return res.status(400).json({ error: "Invalid rating" });
+    }
+    // Store in Supabase feedback table
+    if (supabase) {
+      const { error } = await supabase.from("response_feedback").insert([{
+        rating,
+        question: (question || "").substring(0, 500),
+        response: (response || "").substring(0, 1000),
+        user_id: userId || "guest",
+        created_at: timestamp || new Date().toISOString(),
+      }]);
+      if (error) {
+        // Table may not exist yet — log but don't fail
+        log("WARN", "Feedback table insert failed (may need schema update)", { error: error.message });
+      }
+    }
+    log("INFO", `Feedback received: ${rating}`, { userId });
+    res.json({ ok: true });
+  } catch (e) {
+    log("ERROR", "Feedback endpoint error", { error: e.message });
+    res.status(500).json({ error: "Failed to save feedback" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// RAG SETUP ENDPOINT — one-time admin endpoint to embed and load
+// all knowledge chunks into Supabase. Protected by RAG_SETUP_KEY.
+// Usage: GET /api/admin/setup-rag?key=YOUR_RAG_SETUP_KEY
+// ═══════════════════════════════════════════════════════════════
+app.get("/api/admin/setup-rag", async (req, res) => {
+  // ── Auth check ────────────────────────────────────────────────
+  const setupKey = process.env.RAG_SETUP_KEY;
+  if (!setupKey) {
+    return res.status(500).json({ error: "RAG_SETUP_KEY not set in environment variables." });
+  }
+  if (req.query.key !== setupKey) {
+    return res.status(403).json({ error: "Invalid setup key." });
+  }
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "OPENAI_API_KEY not set in environment variables." });
+  }
+  if (!supabase) {
+    return res.status(500).json({ error: "Supabase not configured." });
+  }
+
+  // ── Check if already loaded ───────────────────────────────────
+  const { count, error: countError } = await supabase
+    .from("knowledge_chunks")
+    .select("*", { count: "exact", head: true });
+
+  if (!countError && count >= 55) {
+    return res.json({
+      status: "already_loaded",
+      message: `Knowledge base already loaded with ${count} chunks. Set RAG_ENABLED=true in Railway to activate.`,
+      chunks: count,
+    });
+  }
+
+  // ── Start embedding process ───────────────────────────────────
+  log("INFO", "RAG setup started", { existingChunks: count || 0 });
+
+  // Send immediate response so Railway doesn't timeout
+  // The process continues in the background
+  res.json({
+    status: "started",
+    message: "RAG setup started. Check /api/admin/setup-rag-status for progress. This takes ~60 seconds.",
+    tip: "After completion, set RAG_ENABLED=true in Railway Variables to activate RAG.",
+  });
+
+  // ── Run embedding in background ───────────────────────────────
+  (async () => {
+    try {
+      const chunks = require("./knowledge_chunks.json");
+      let loaded = 0;
+      let failed = 0;
+      const errors = [];
+
+      for (const chunk of chunks) {
+        try {
+          // Check if this chunk already exists
+          const { data: existing } = await supabase
+            .from("knowledge_chunks")
+            .select("id")
+            .eq("id", chunk.id)
+            .single();
+
+          if (existing) {
+            loaded++;
+            continue; // Skip already-loaded chunks
+          }
+
+          // Embed the chunk
+          const text = `${chunk.topic}
+Tags: ${chunk.tags.join(", ")}
+
+${chunk.content}`;
+          const resp = await openaiClient.embeddings.create({
+            model: "text-embedding-3-small",
+            input: text,
+          });
+          const embedding = resp.data[0].embedding;
+
+          // Store in Supabase
+          const { error: upsertError } = await supabase
+            .from("knowledge_chunks")
+            .upsert({
+              id: chunk.id,
+              topic: chunk.topic,
+              category: chunk.category,
+              tags: chunk.tags,
+              content: chunk.content,
+              embedding,
+            });
+
+          if (upsertError) {
+            errors.push(`${chunk.id}: ${upsertError.message}`);
+            failed++;
+          } else {
+            loaded++;
+          }
+
+          // Small delay to avoid OpenAI rate limits
+          await new Promise(r => setTimeout(r, 150));
+
+        } catch (chunkErr) {
+          errors.push(`${chunk.id}: ${chunkErr.message}`);
+          failed++;
+        }
+      }
+
+      // Store final status in Supabase for the status endpoint to read
+      await supabase.from("rag_setup_status").upsert({
+        id: "latest",
+        status: failed === 0 ? "complete" : "complete_with_errors",
+        loaded,
+        failed,
+        errors: errors.slice(0, 10), // store first 10 errors
+        completed_at: new Date().toISOString(),
+      }).catch(() => {}); // ignore if table doesn't exist
+
+      log("INFO", `RAG setup complete: ${loaded} loaded, ${failed} failed`, { errors });
+
+    } catch (e) {
+      log("ERROR", "RAG setup background process failed", { error: e.message });
+    }
+  })();
+});
+
+// ── RAG setup status endpoint ──────────────────────────────────
+app.get("/api/admin/setup-rag-status", async (req, res) => {
+  const setupKey = process.env.RAG_SETUP_KEY;
+  if (!setupKey || req.query.key !== setupKey) {
+    return res.status(403).json({ error: "Invalid setup key." });
+  }
+
+  try {
+    // Check current chunk count
+    const { count } = await supabase
+      .from("knowledge_chunks")
+      .select("*", { count: "exact", head: true });
+
+    // Try to get status record
+    let statusRecord = null;
+    try {
+      const { data } = await supabase
+        .from("rag_setup_status")
+        .select("*")
+        .eq("id", "latest")
+        .single();
+      statusRecord = data;
+    } catch {}
+
+    if (statusRecord?.status === "complete" || statusRecord?.status === "complete_with_errors") {
+      return res.json({
+        status: statusRecord.status,
+        chunks_in_db: count,
+        loaded: statusRecord.loaded,
+        failed: statusRecord.failed,
+        errors: statusRecord.errors,
+        completed_at: statusRecord.completed_at,
+        next_step: count >= 55
+          ? "✅ Done! Set RAG_ENABLED=true in Railway Variables to activate RAG."
+          : `⚠️ Only ${count} chunks loaded. Hit setup-rag again to load remaining chunks.`,
+      });
+    }
+
+    return res.json({
+      status: count > 0 ? "in_progress" : "not_started",
+      chunks_in_db: count,
+      message: count > 0
+        ? `${count} chunks loaded so far. Still running...`
+        : "Setup not started or still initializing.",
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/health", (req, res) => {
   res.json({
     status        : CFG.AGENT_ENABLED ? "ok" : "disabled",
@@ -367,7 +635,7 @@ app.post("/api/chat", agentGuard, ClerkExpressWithAuth(), async (req, res) => {
     const payload = {
       model      : model || "claude-sonnet-4-6",
       max_tokens : max_tokens || 8000,
-      system,
+      system     : effectiveSystem,
       messages,
     };
     if (tools && tools.length > 0) payload.tools = tools;

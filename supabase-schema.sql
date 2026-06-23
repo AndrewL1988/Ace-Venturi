@@ -123,3 +123,29 @@ CREATE TRIGGER update_assets_updated_at
 -- ─── DONE ─────────────────────────────────────────────────
 -- Your database is ready.
 -- Next: add REACT_APP_SUPABASE_URL and REACT_APP_SUPABASE_ANON_KEY to your .env
+
+-- Response feedback table for thumbs up/down training data
+CREATE TABLE IF NOT EXISTS response_feedback (
+  id bigserial PRIMARY KEY,
+  rating text NOT NULL CHECK (rating IN ('up', 'down')),
+  question text,
+  response text,
+  user_id text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Index for querying negative feedback (most useful for training)
+CREATE INDEX IF NOT EXISTS idx_feedback_rating ON response_feedback(rating);
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON response_feedback(created_at DESC);
+
+-- View for easy review of thumbs-down responses
+CREATE OR REPLACE VIEW feedback_review AS
+SELECT
+  id,
+  rating,
+  created_at,
+  user_id,
+  left(question, 200) AS question_preview,
+  left(response, 300) AS response_preview
+FROM response_feedback
+ORDER BY created_at DESC;
